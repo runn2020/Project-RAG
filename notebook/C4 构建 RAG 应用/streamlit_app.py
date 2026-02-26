@@ -6,6 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableBranch, RunnablePassthrough
 import sys
 sys.path.append("notebook/C3 搭建知识库") # 将父目录放入系统路径中
+sys.path.append("notebook/C4 构建RAG应用") # 将父目录放入系统路径中
 from zhipuai_embedding import ZhipuAIEmbeddings
 from langchain_community.vectorstores import Chroma
 
