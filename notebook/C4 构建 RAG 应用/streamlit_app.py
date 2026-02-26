@@ -26,7 +26,7 @@ def combine_docs(docs):
 
 def get_qa_history_chain():
     retriever = get_retriever()
-    llm = ZhipuaiLLM(model_name="glm-4.7")
+    llm = ZhipuaiLLM(model_name="glm-4.7",api_key = 'acf8bd7306d9447cb6bdc356ee959137.bvnLva7vcDCMwTSh')
     condense_question_system_template = (
         "请根据聊天记录总结用户最近的问题，"
         "如果没有多余的聊天记录则返回用户的问题。"
@@ -111,3 +111,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
