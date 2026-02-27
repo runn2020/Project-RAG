@@ -17,7 +17,6 @@ PERSIST_DIR = "data_base/vector_db2/chroma"
 DOCS_DIR = "data_base/docs"
 
 os.makedirs(DOCS_DIR, exist_ok=True)
-os.makedirs(os.path.dirname(PERSIST_DIR), exist_ok=True)
 
 # 从 secrets 中读取 API key（请在 Streamlit Cloud 的 Secrets 中设置）
 if "ZHIPUAI_API_KEY" in st.secrets:
