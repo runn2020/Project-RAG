@@ -1,8 +1,5 @@
 # app.py
 import os
-import base64
-from pathlib import Path
-
 import streamlit as st
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -15,56 +12,10 @@ from zhipuai_embedding import ZhipuAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from zhipuai_llm import ZhipuaiLLM
 
-# ---------- 背景设置函数（使用仓库内静态图片 static/bg.jpg） ----------
-def set_page_background(local_path: str = "static/bg.png", opacity: float = 0.30):
-    """
-    使用仓库内图片作为页面背景（Base64 嵌入）。
-    local_path: 相对仓库路径，例如 static/bg.jpg
-    opacity: 主体内容遮罩不透明度 (0-1)，越大主体越不透明（可读性越好）
-    """
-    p = Path(local_path)
-    if not p.exists():
-        # 不抛异常，仅在侧边栏提示一次（在 main() 中会显示）
-        return False
-
-    try:
-        image_bytes = p.read_bytes()
-        img_base64 = base64.b64encode(image_bytes).decode()
-    except Exception:
-        return False
-
-    css = f"""
-    <style>
-    /* 整页背景 */
-    [data-testid="stAppViewContainer"] {{
-        background-image: url("data:image/png;base64,{img_base64}");
-        background-size: cover;
-        background-position: center;
-        background-repeat: no-repeat;
-        background-attachment: fixed;
-    }}
-    /* 侧边栏背景半透明（保证控件可读） */
-    [data-testid="stSidebar"] {{
-        background-color: rgba(255,255,255,0.85);
-    }}
-    /* 主内容区遮罩：多选择器兼容不同 streamlit 版本 */
-    .block-container, .main, .css-18e3th9, .stApp {{
-        background: rgba(255,255,255,{opacity}) !important;
-        border-radius: 10px;
-        padding: 1rem;
-    }}
-    /* 若需要让文字更显眼，可加一点投影 */
-    .stApp, .block-container {{
-        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-    }}
-    </style>
-    """
-    st.markdown(css, unsafe_allow_html=True)
-    return True
-
 # 文件/路径定义
 PERSIST_DIR = "data_base/vector_db2/chroma"
 DOCS_DIR = "data_base/docs"
+
 os.makedirs(DOCS_DIR, exist_ok=True)
 
 
@@ -166,6 +117,7 @@ def get_retriever():
 
 # ---------- combine_docs ----------
 def combine_docs(docs):
+    
     try:
         # 如果是 dict-like 的情况
         if isinstance(docs, dict) and "context" in docs:
@@ -261,14 +213,6 @@ def gen_response(chain, input_text, chat_history, model_name, temperature, max_t
 # ---------- Streamlit UI ----------
 def main():
     st.set_page_config(page_title="RAG Chat with Upload", layout="wide")
-
-    # 尝试设置背景（默认为 static/bg.jpg）
-    bg_ok = set_page_background(local_path="static/bg.png", opacity=0.30)
-    if not bg_ok:
-        # 若没有背景图，给出提示（仅在侧边栏）
-        with st.sidebar:
-            st.info("默认背景图片 static/bg.png 未找到；如需自定义背景，请把图片放到仓库 static/bg.png")
-
     st.title("🔎 基于RAG的云端个人知识库助手 🦜")
 
     # 左侧：参数与上传
@@ -361,4 +305,6 @@ def main():
         st.session_state.messages.append(("ai", output or status_msg))
 
 if __name__ == "__main__":
+
     main()
+
