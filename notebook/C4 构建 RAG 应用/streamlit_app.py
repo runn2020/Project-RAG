@@ -29,7 +29,7 @@ else:
     else:
         st.warning("未找到 ZHIPUAI_API_KEY， 请在 Streamlit Secrets 中添加。")
 
-def add_bg_from_local(image_path="static/bg.png", sidebar_cover_rgba="rgba(255,255,255,0.98)", main_overlay_rgba="rgba(255,255,255,0.0)"):
+def add_bg_from_local(image_path="static/bg.png", sidebar_cover_rgba="rgba(0,0,0,1.0)", main_overlay_rgba="rgba(255,255,255,0.0)"):
     """
     将本地图片内联为 base64 并通过 CSS 设置为 app 主区域背景。
     参数:
@@ -275,7 +275,7 @@ def main():
     st.set_page_config(page_title="RAG Chat with Upload", layout="wide")
     # 在页面初始化时添加背景
     add_bg_from_local(image_path="static/bg.png",
-                      sidebar_cover_rgba="rgba(255,255,255,0.96)",
+                      sidebar_cover_rgba="rgba(0,0,0,1.0)",
                       main_overlay_rgba="rgba(255,255,255,0.0)")
     st.title("🔎 基于RAG的云端个人知识库助手 🦜")
 
