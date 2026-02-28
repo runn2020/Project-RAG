@@ -29,53 +29,83 @@ else:
     else:
         st.warning("未找到 ZHIPUAI_API_KEY， 请在 Streamlit Secrets 中添加。")
 
-def set_page_background(local_path: str = "static/bg.png", opacity: float = 0.30):
+def set_page_background(local_path: str = "static/bg.jpg", mask_alpha: float = 0.55, blur_px: int = 0):
     """
-    把背景仅应用到主内容区（问答区域）。
-    local_path: 仓库内图片相对路径，例如 static/bg.png
-    opacity: 主体内容遮罩不透明度 (0-1)，越大主体越不透明（可读性越好）
+    把背景仅显示在主内容区（对话区）背后（不会影响侧边栏）。
+    local_path: 仓库内图片相对路径，例如 static/bg.jpg
+    mask_alpha: 对话内容区白色遮罩 alpha（0 = 完全透明，1 = 不透明）
+    blur_px: 背景模糊像素（0 无模糊）
+    返回 True 表示找到图片并注入成功，False 表示未找到图片。
     """
     from pathlib import Path
+    import base64
+
     p = Path(local_path)
     if not p.exists():
         return False
 
     try:
         image_bytes = p.read_bytes()
-        import base64
         img_base64 = base64.b64encode(image_bytes).decode()
     except Exception:
         return False
 
+    # CSS：尝试用多个选择器以兼容不同 streamlit 版本
     css = f"""
     <style>
-    /* 仅给主内容区设置背景（不会影响侧边栏） */
-    [data-testid="stMain"] {{
+    /* 确保主区域定位以放置伪元素背景 */
+    [data-testid="stMain"], main[role="main"], .main, .reportview-container {{
+        position: relative !important;
+        overflow: visible !important;
+    }}
+
+    /* 背景作为主区的 ::before，位于主区内容后面 */
+    [data-testid="stMain"]::before,
+    main[role="main"]::before,
+    .main::before,
+    .reportview-container::before {{
+        content: "";
+        pointer-events: none;
+        position: absolute;
+        inset: 0;
         background-image: url("data:image/png;base64,{img_base64}");
         background-size: cover;
         background-position: center;
         background-repeat: no-repeat;
         background-attachment: fixed;
-        padding: 1rem; /* 防止内容紧贴边框 */
-        border-radius: 8px;
+        z-index: -1;
+        filter: blur({blur_px}px);
+        opacity: 1;
     }}
 
-    /* 在主区域内再加一个半透明遮罩，保证文字可读性 */
-    [data-testid="stMain"] .block-container {{
-        background: rgba(255,255,255,{opacity}) !important;
-        backdrop-filter: blur(6px) saturate(120%);
+    /* 主区内的 block-container 保持半透明白底，允许背景透出 */
+    [data-testid="stMain"] .block-container,
+    main[role="main"] .block-container,
+    .main .block-container,
+    .reportview-container .block-container {{
+        background: rgba(255,255,255,{mask_alpha}) !important;
         border-radius: 10px;
-        padding: 1rem;
+        padding: 1rem !important;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.05) !important;
     }}
 
-    /* 明确把侧边栏保持为默认/半透明白底，避免被背景覆盖 */
+    /* 兼容性：若 Streamlit 版本用其它类名（备用选择器） */
+    .stApp > main::before {{
+        content: "";
+        display: none;
+    }}
+
+    /* 明确保持侧边栏白底（不受背景影响） */
     [data-testid="stSidebar"] {{
-        background-color: rgba(255,255,255,0.92) !important;
+        background-color: rgba(255,255,255,0.95) !important;
+    }}
+    [data-testid="stSidebar"] .css-1d391kg, [data-testid="stSidebar"] .sidebar-content {{
+        background-color: transparent !important;
     }}
 
-    /* 可选：让主区有轻微阴影以更显眼（可去掉） */
-    [data-testid="stMain"] .block-container {{
-        box-shadow: 0 6px 20px rgba(0,0,0,0.06) !important;
+    /* 防止背景覆盖交互元素（确保伪元素在最底层） */
+    [data-testid="stMain"]::before {{
+        z-index: -999;
     }}
     </style>
     """
