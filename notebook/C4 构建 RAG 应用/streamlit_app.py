@@ -29,6 +29,60 @@ else:
     else:
         st.warning("未找到 ZHIPUAI_API_KEY， 请在 Streamlit Secrets 中添加。")
 
+def set_page_background(local_path: str = "static/bg.png", opacity: float = 0.30):
+    """
+    把背景仅应用到主内容区（问答区域）。
+    local_path: 仓库内图片相对路径，例如 static/bg.png
+    opacity: 主体内容遮罩不透明度 (0-1)，越大主体越不透明（可读性越好）
+    """
+    from pathlib import Path
+    p = Path(local_path)
+    if not p.exists():
+        return False
+
+    try:
+        image_bytes = p.read_bytes()
+        import base64
+        img_base64 = base64.b64encode(image_bytes).decode()
+    except Exception:
+        return False
+
+    css = f"""
+    <style>
+    /* 仅给主内容区设置背景（不会影响侧边栏） */
+    [data-testid="stMain"] {{
+        background-image: url("data:image/png;base64,{img_base64}");
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+        background-attachment: fixed;
+        padding: 1rem; /* 防止内容紧贴边框 */
+        border-radius: 8px;
+    }}
+
+    /* 在主区域内再加一个半透明遮罩，保证文字可读性 */
+    [data-testid="stMain"] .block-container {{
+        background: rgba(255,255,255,{opacity}) !important;
+        backdrop-filter: blur(6px) saturate(120%);
+        border-radius: 10px;
+        padding: 1rem;
+    }}
+
+    /* 明确把侧边栏保持为默认/半透明白底，避免被背景覆盖 */
+    [data-testid="stSidebar"] {{
+        background-color: rgba(255,255,255,0.92) !important;
+    }}
+
+    /* 可选：让主区有轻微阴影以更显眼（可去掉） */
+    [data-testid="stMain"] .block-container {{
+        box-shadow: 0 6px 20px rgba(0,0,0,0.06) !important;
+    }}
+    </style>
+    """
+    st.markdown(css, unsafe_allow_html=True)
+    return True
+
+
 # ---------- 工具函数：解析上传文件 ----------
 def extract_text_from_file(filepath):
     """支持 txt / pdf / docx 格式，失败则返回空字符串"""
@@ -214,7 +268,10 @@ def gen_response(chain, input_text, chat_history, model_name, temperature, max_t
 def main():
     st.set_page_config(page_title="RAG Chat with Upload", layout="wide")
     st.title("🔎 基于RAG的云端个人知识库助手 🦜")
+    # 尝试设置背景（默认为 static/bg.jpg）
+    bg_ok = set_page_background(opacity=0.30)
 
+    st.title("🔎 基于RAG的云端个人知识库助手 🦜")
     # 左侧：参数与上传
     with st.sidebar:
         st.header("模型参数")
