@@ -299,7 +299,7 @@ def main():
     st.set_page_config(page_title="RAG Chat with Upload", layout="wide")
     st.title("🔎 基于RAG的云端个人知识库助手 🦜")
     # 尝试设置背景（默认为 static/bg.jpg）
-    bg_ok = set_page_background(local_path="static/bg.png", opacity=0.30)
+    bg_ok = set_page_background(local_path="static/bg.png")
     if not bg_ok:
         # 若没有背景图，给出提示（仅在侧边栏）
         with st.sidebar:
