@@ -207,67 +207,40 @@ def extract_text_from_file(filepath):
     except Exception as e:
         st.error(f"解析文件失败: {e}")
         return ""
-
-# ---------- 重建索引（从 DOCS_DIR 中的所有文件） ----------
-# def rebuild_vector_index(embedding):
-#     """从 DOCS_DIR 的所有文件读取文本，创建/覆盖 Chroma 向量库"""
-#     files = [os.path.join(DOCS_DIR, fn) for fn in os.listdir(DOCS_DIR)]
-#     texts = []
-#     metadatas = []
-#     for fp in files:
-#         txt = extract_text_from_file(fp)
-#         if txt and txt.strip():
-#             texts.append(txt)
-#             metadatas.append({"source": os.path.basename(fp)})
-#     if not texts:
-#         # 如果没有文本，创建一个空的 Chroma（或返回 None）
-#         # 这里我们返回 None 表示没有有效索引
-#         return None
-
-#     # 使用 Chroma.from_texts 来重建索引并持久化
-#     try:
-#         vectordb = Chroma.from_texts(
-#             texts=texts,
-#             embedding=embedding,
-#             persist_directory=PERSIST_DIR,
-#             metadatas=metadatas,
-#         )
-#         vectordb.persist()
-#         return vectordb
-#     except Exception as e:
-#         st.error(f"重建向量索引失败: {e}")
-#         return None
 def rebuild_vector_index(embedding):
-    """从 DOCS_DIR 的所有文件读取文本，创建/覆盖 Chroma 向量库。返回 vectordb 或 None。"""
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+
     if not os.path.isdir(DOCS_DIR):
         st.warning(f"DOCS_DIR 不存在: {DOCS_DIR}")
         return None
 
-    files = [fn for fn in os.listdir(DOCS_DIR) if os.path.isfile(os.path.join(DOCS_DIR, fn))]
+    files = [fn for fn in os.listdir(DOCS_DIR)
+             if os.path.isfile(os.path.join(DOCS_DIR, fn))]
+
     if not files:
         st.info("DOCS_DIR 为空。")
         return None
 
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,
+        chunk_overlap=150,
+    )
+
     texts = []
     metadatas = []
-    skipped = []
+
     for fn in files:
         fp = os.path.join(DOCS_DIR, fn)
-        try:
-            txt = extract_text_from_file(fp)
-            if txt and txt.strip():
-                texts.append(txt)
-                metadatas.append({"source": fn})
-            else:
-                skipped.append((fn, "no text extracted / unsupported format"))
-        except Exception as e:
-            skipped.append((fn, f"extract error: {e}"))
+        txt = extract_text_from_file(fp)
 
-    # 把调试信息展示到 UI，便于定位问题
-    st.info(f"找到文件: {files}")
-    if skipped:
-        st.warning(f"以下文件未被加入索引（文件名, 原因）：{skipped}")
-    st.info(f"将用于索引的文档数: {len(texts)}")
+        if txt and txt.strip():
+            chunks = text_splitter.split_text(txt)
+
+            for chunk in chunks:
+                texts.append(chunk)
+                metadatas.append({"source": fn})
+
+    st.info(f"生成 chunk 数量: {len(texts)}")
 
     if not texts:
         return None
@@ -284,6 +257,53 @@ def rebuild_vector_index(embedding):
     except Exception as e:
         st.error(f"重建向量索引失败: {e}")
         return None
+# def rebuild_vector_index(embedding):
+#     """从 DOCS_DIR 的所有文件读取文本，创建/覆盖 Chroma 向量库。返回 vectordb 或 None。"""
+#     if not os.path.isdir(DOCS_DIR):
+#         st.warning(f"DOCS_DIR 不存在: {DOCS_DIR}")
+#         return None
+
+#     files = [fn for fn in os.listdir(DOCS_DIR) if os.path.isfile(os.path.join(DOCS_DIR, fn))]
+#     if not files:
+#         st.info("DOCS_DIR 为空。")
+#         return None
+
+#     texts = []
+#     metadatas = []
+#     skipped = []
+#     for fn in files:
+#         fp = os.path.join(DOCS_DIR, fn)
+#         try:
+#             txt = extract_text_from_file(fp)
+#             if txt and txt.strip():
+#                 texts.append(txt)
+#                 metadatas.append({"source": fn})
+#             else:
+#                 skipped.append((fn, "no text extracted / unsupported format"))
+#         except Exception as e:
+#             skipped.append((fn, f"extract error: {e}"))
+
+#     # 把调试信息展示到 UI，便于定位问题
+#     st.info(f"找到文件: {files}")
+#     if skipped:
+#         st.warning(f"以下文件未被加入索引（文件名, 原因）：{skipped}")
+#     st.info(f"将用于索引的文档数: {len(texts)}")
+
+#     if not texts:
+#         return None
+
+#     try:
+#         vectordb = Chroma.from_texts(
+#             texts=texts,
+#             embedding=embedding,
+#             persist_directory=PERSIST_DIR,
+#             metadatas=metadatas,
+#         )
+#         vectordb.persist()
+#         return vectordb
+#     except Exception as e:
+#         st.error(f"重建向量索引失败: {e}")
+#         return None
 # ---------- 获取检索器 ----------
 def get_retriever():
     embedding = ZhipuAIEmbeddings()
@@ -340,6 +360,7 @@ def get_qa_history_chain(model_name="glm-4-plus", temperature=0.0, max_tokens=10
     "你是一个问答任务的助手。"
     "请优先结合检索到的上下文片段回答问题。"
     "如果检索到的上下文为空或不足以回答问题，请结合你的通用知识回答。"
+    "告知用户是否检索到知识库信息。"
     "保持回答简洁明了。"
         "\n\n"
         "{context}"
