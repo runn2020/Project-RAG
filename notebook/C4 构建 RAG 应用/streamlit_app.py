@@ -12,11 +12,15 @@ from zhipuai_embedding import ZhipuAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from zhipuai_llm import ZhipuaiLLM
 import base64
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 # 文件/路径定义
 PERSIST_DIR = "data_base/vector_db2/chroma"
 DOCS_DIR = "data_base/docs"
 
 os.makedirs(DOCS_DIR, exist_ok=True)
+os.makedirs(PERSIST_DIR, exist_ok=True)
 
 
 # 从 secrets 中读取 API key（请在 Streamlit Cloud 的 Secrets 中设置）
@@ -28,6 +32,85 @@ else:
         pass
     else:
         st.warning("未找到 ZHIPUAI_API_KEY， 请在 Streamlit Secrets 中添加。")
+
+def github_put_file(token: str, repo_full: str, path_in_repo: str, file_bytes: bytes,
+                    commit_message: str, branch: str = "main", timeout=30):
+    """
+    Create or update a file in a GitHub repo using Contents API.
+    使用 requests.Session + Retry，带超时和详细错误返回。
+    返回 (ok: bool, info: dict_or_str)
+    """
+    if not token:
+        return False, "missing github token"
+
+    # 基本大小限制（避免一口气上传超大文件导致连接被重置）
+    MAX_BYTES = 8 * 1024 * 1024  # 8 MB，按需调整或提升（GitHub contents API 对大文件不友好）
+    if len(file_bytes) > MAX_BYTES:
+        return False, f"file too large ({len(file_bytes)} bytes). Use git push or LFS for large files."
+
+    url = f"https://api.github.com/repos/{repo_full}/contents/{path_in_repo}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "streamlit-app"
+    }
+
+    # 配置 session + retry（重试 3 次，针对 idempotent 的 GET/PUT 可用）
+    session = requests.Session()
+    retries = Retry(total=3, backoff_factor=1,
+                    status_forcelist=(429, 500, 502, 503, 504),
+                    allowed_methods=frozenset(['GET','PUT','POST','DELETE','HEAD','OPTIONS']))
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+    try:
+        # 先检查文件是否存在（获取 sha）
+        r = session.get(url, headers=headers, params={"ref": branch}, timeout=timeout)
+    except requests.exceptions.SSLError as e:
+        return False, f"ssl error when checking existence: {e}"
+    except requests.exceptions.ReadTimeout:
+        return False, "timeout when checking file existence"
+    except requests.exceptions.ConnectionError as e:
+        return False, f"connection error when checking existence: {e}"
+    except Exception as e:
+        return False, f"unexpected error when checking existence: {e}"
+
+    # 准备 payload
+    import base64
+    b64 = base64.b64encode(file_bytes).decode()
+    if r.status_code == 200:
+        try:
+            sha = r.json().get("sha")
+        except Exception:
+            sha = None
+        payload = {"message": commit_message, "content": b64, "branch": branch, "sha": sha}
+    elif r.status_code == 404:
+        payload = {"message": commit_message, "content": b64, "branch": branch}
+    else:
+        # 把响应体和状态码返回，便于 debug
+        return False, f"check existence failed: {r.status_code} {r.text}"
+
+    try:
+        resp = session.put(url, headers=headers, json=payload, timeout=timeout)
+    except requests.exceptions.SSLError as e:
+        return False, f"ssl error on put: {e}"
+    except requests.exceptions.ReadTimeout:
+        return False, "timeout on put request"
+    except requests.exceptions.ConnectionError as e:
+        return False, f"connection error on put: {e}"
+    except Exception as e:
+        return False, f"unexpected error on put: {e}"
+
+    # 返回详细信息，方便定位
+    if resp.status_code in (200, 201):
+        try:
+            return True, resp.json()
+        except Exception:
+            return True, {"status_code": resp.status_code, "text": resp.text}
+    else:
+        return False, f"upload failed: {resp.status_code} {resp.text}"
+
 
 def add_bg_from_local(image_path="static/bg.png", sidebar_cover_rgba="rgba(0,0,0,1.0)", main_overlay_rgba="rgba(255,255,255,0.0)"):
     """
@@ -126,22 +209,69 @@ def extract_text_from_file(filepath):
         return ""
 
 # ---------- 重建索引（从 DOCS_DIR 中的所有文件） ----------
+# def rebuild_vector_index(embedding):
+#     """从 DOCS_DIR 的所有文件读取文本，创建/覆盖 Chroma 向量库"""
+#     files = [os.path.join(DOCS_DIR, fn) for fn in os.listdir(DOCS_DIR)]
+#     texts = []
+#     metadatas = []
+#     for fp in files:
+#         txt = extract_text_from_file(fp)
+#         if txt and txt.strip():
+#             texts.append(txt)
+#             metadatas.append({"source": os.path.basename(fp)})
+#     if not texts:
+#         # 如果没有文本，创建一个空的 Chroma（或返回 None）
+#         # 这里我们返回 None 表示没有有效索引
+#         return None
+
+#     # 使用 Chroma.from_texts 来重建索引并持久化
+#     try:
+#         vectordb = Chroma.from_texts(
+#             texts=texts,
+#             embedding=embedding,
+#             persist_directory=PERSIST_DIR,
+#             metadatas=metadatas,
+#         )
+#         vectordb.persist()
+#         return vectordb
+#     except Exception as e:
+#         st.error(f"重建向量索引失败: {e}")
+#         return None
 def rebuild_vector_index(embedding):
-    """从 DOCS_DIR 的所有文件读取文本，创建/覆盖 Chroma 向量库"""
-    files = [os.path.join(DOCS_DIR, fn) for fn in os.listdir(DOCS_DIR)]
-    texts = []
-    metadatas = []
-    for fp in files:
-        txt = extract_text_from_file(fp)
-        if txt and txt.strip():
-            texts.append(txt)
-            metadatas.append({"source": os.path.basename(fp)})
-    if not texts:
-        # 如果没有文本，创建一个空的 Chroma（或返回 None）
-        # 这里我们返回 None 表示没有有效索引
+    """从 DOCS_DIR 的所有文件读取文本，创建/覆盖 Chroma 向量库。返回 vectordb 或 None。"""
+    if not os.path.isdir(DOCS_DIR):
+        st.warning(f"DOCS_DIR 不存在: {DOCS_DIR}")
         return None
 
-    # 使用 Chroma.from_texts 来重建索引并持久化
+    files = [fn for fn in os.listdir(DOCS_DIR) if os.path.isfile(os.path.join(DOCS_DIR, fn))]
+    if not files:
+        st.info("DOCS_DIR 为空。")
+        return None
+
+    texts = []
+    metadatas = []
+    skipped = []
+    for fn in files:
+        fp = os.path.join(DOCS_DIR, fn)
+        try:
+            txt = extract_text_from_file(fp)
+            if txt and txt.strip():
+                texts.append(txt)
+                metadatas.append({"source": fn})
+            else:
+                skipped.append((fn, "no text extracted / unsupported format"))
+        except Exception as e:
+            skipped.append((fn, f"extract error: {e}"))
+
+    # 把调试信息展示到 UI，便于定位问题
+    st.info(f"找到文件: {files}")
+    if skipped:
+        st.warning(f"以下文件未被加入索引（文件名, 原因）：{skipped}")
+    st.info(f"将用于索引的文档数: {len(texts)}")
+
+    if not texts:
+        return None
+
     try:
         vectordb = Chroma.from_texts(
             texts=texts,
@@ -154,7 +284,6 @@ def rebuild_vector_index(embedding):
     except Exception as e:
         st.error(f"重建向量索引失败: {e}")
         return None
-
 # ---------- 获取检索器 ----------
 def get_retriever():
     embedding = ZhipuAIEmbeddings()
@@ -289,15 +418,59 @@ def main():
         st.markdown("---")
 
         st.header("文档管理（上传/重建索引）")
+        # 读取 GitHub 配置（放在 sidebar 内）
+        github_token = st.secrets.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        github_repo = st.secrets.get("GITHUB_REPO") or os.environ.get("GITHUB_REPO")  # 格式: owner/repo
+        github_branch = st.secrets.get("GITHUB_BRANCH") or os.environ.get("GITHUB_BRANCH") or "main"
+
         uploaded = st.file_uploader("上传本地文档（.txt, .pdf, .docx）", accept_multiple_files=True)
+
         if uploaded:
             for up in uploaded:
                 save_path = os.path.join(DOCS_DIR, up.name)
-                # 保存文件
+
+                # 保存到本地（供当前服务器读取）
                 with open(save_path, "wb") as f:
                     f.write(up.getbuffer())
-                st.success(f"已保存: {up.name}")
-            st.info("上传完毕，请点击下方“重建索引”以把新文档加入检索库。")
+
+                st.success(f"已保存到服务器: {up.name}")
+
+                # ---------- 推送到 GitHub ----------
+                if github_token and github_repo:
+                    try:
+                        with open(save_path, "rb") as f:
+                            file_bytes = f.read()
+
+                        # 可配置的单文件大小上限（防止上传太大导致连接中断）
+                        MAX_BYTES = 8 * 1024 * 1024  # 8MB
+                        if len(file_bytes) > MAX_BYTES:
+                            st.error(f"文件过大 ({len(file_bytes)} bytes)。请使用 git push 或启用 Git LFS。")
+                            continue
+
+                        repo_path = f"data_base/docs/{up.name}"  # GitHub 中保存路径
+                        commit_msg = f"Upload file {up.name} from Streamlit App"
+
+                        ok, result = github_put_file(
+                            github_token,
+                            github_repo,
+                            repo_path,
+                            file_bytes,
+                            commit_msg,
+                            branch=github_branch
+                        )
+
+                        if ok:
+                            st.success(f"已推送到 GitHub: {github_repo}/{repo_path}")
+                        else:
+                            # result 会包含失败原因或响应体，显示给用户便于 debug
+                            st.error(f"GitHub 推送失败: {result}")
+
+                    except Exception as e:
+                        st.error(f"GitHub 上传异常(捕获): {e}")
+                else:
+                    st.warning("未配置 GITHUB_TOKEN 或 GITHUB_REPO，跳过 GitHub 推送。")
+
+            st.info("上传完成，如需加入检索库请点击“重建索引”。")
 
         force_rebuild = st.button("🔁 重建索引 更新检索库")
         if force_rebuild:
