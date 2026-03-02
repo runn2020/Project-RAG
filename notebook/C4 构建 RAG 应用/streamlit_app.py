@@ -282,7 +282,7 @@ def main():
     # 左侧：参数与上传
     with st.sidebar:
         st.header("模型参数")
-        model_name = st.selectbox("Model", options=['GLM-4.7-FlashX',"glm-4.6V", "glm-4.7", "glm-4-plus", "glm-5",'GLM-4.5','GLM-4.5-Air'], index=0)
+        model_name = st.selectbox("Model", options=['GLM-4.5-Air', 'GLM-4.7-FlashX',"glm-4.6V", "glm-4.7", "glm-4-plus", "glm-5",'GLM-4.5'], index=0)
         temperature = st.slider("temperature", min_value=0.0, max_value=1.0, value=0.0, step=0.01)
         max_tokens = st.number_input("max_tokens", min_value=64, max_value=4096, value=1024, step=64)
         top_p = st.slider("top_p", min_value=0.0, max_value=1.0, value=1.0, step=0.01)
