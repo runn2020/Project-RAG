@@ -76,8 +76,6 @@ def github_put_file(token: str, repo_full: str, path_in_repo: str, file_bytes: b
     except Exception as e:
         return False, f"unexpected error when checking existence: {e}"
 
-    # 准备 payload
-    import base64
     b64 = base64.b64encode(file_bytes).decode()
     if r.status_code == 200:
         try:
@@ -360,7 +358,7 @@ def get_qa_history_chain(model_name="glm-4-plus", temperature=0.0, max_tokens=10
     "你是一个问答任务的助手。"
     "请优先结合检索到的上下文片段回答问题。"
     "如果检索到的上下文为空或不足以回答问题，请结合你的通用知识回答。"
-    "告知用户是否检索到知识库信息。"
+    "告知用户是否检索到上下文信息。"
     "保持回答简洁明了。"
         "\n\n"
         "{context}"
@@ -455,7 +453,12 @@ def main():
                     f.write(up.getbuffer())
 
                 st.success(f"已保存到服务器: {up.name}")
-
+                # 立即列出目录，便于 debug
+                try:
+                    files_info = [(fn, os.path.getsize(os.path.join(DOCS_DIR, fn))) for fn in os.listdir(DOCS_DIR)]
+                    st.info(f"当前 {DOCS_DIR} 文件: {files_info}")
+                except Exception as e:
+                    st.warning(f"列出 DOCS_DIR 失败: {e}")
                 # ---------- 推送到 GitHub ----------
                 if github_token and github_repo:
                     try:
