@@ -109,6 +109,217 @@ def github_put_file(token: str, repo_full: str, path_in_repo: str, file_bytes: b
     else:
         return False, f"upload failed: {resp.status_code} {resp.text}"
 
+# ---------- GitHub <-> Chroma 合并工具（下载 -> 备份 -> 合并 -> 上传 -> 回滚点） ----------
+import tempfile
+import shutil
+import zipfile
+import hashlib
+import time
+import json
+
+# 最大单文件上传阈值（需与 github_put_file 内 MAX_BYTES 保持一致）
+GITHUB_UPLOAD_MAX_BYTES = 8 * 1024 * 1024  # 8 MB
+
+def _make_tmpdir(prefix="chroma_merge_"):
+    return tempfile.mkdtemp(prefix=prefix)
+
+def _zip_dir(src_dir, zip_path):
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(src_dir):
+            for fn in files:
+                full = os.path.join(root, fn)
+                arcname = os.path.relpath(full, src_dir)
+                zf.write(full, arcname)
+
+def download_github_dir(token, repo_full, dir_in_repo, save_to_dir, branch="main", timeout=30):
+    """
+    递归下载 repo:dir_in_repo 到本地 save_to_dir（保留结构）。
+    返回 (True, "ok") 或 (False, "err_msg")
+    """
+    session = requests.Session()
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+    api_url = f"https://api.github.com/repos/{repo_full}/contents/{dir_in_repo.lstrip('/')}"
+    try:
+        r = session.get(api_url, headers=headers, params={"ref": branch}, timeout=timeout)
+    except Exception as e:
+        return False, f"请求 GitHub 列表失败: {e}"
+
+    if r.status_code != 200:
+        return False, f"list failed: {r.status_code} {r.text}"
+
+    items = r.json()
+    os.makedirs(save_to_dir, exist_ok=True)
+
+    for item in items:
+        it_type = item.get("type")
+        name = item.get("name")
+        if it_type == "file":
+            # 尝试使用 download_url（速度快），否则使用 contents API 获取 base64
+            download_url = item.get("download_url")
+            target = os.path.join(save_to_dir, name)
+            try:
+                if download_url:
+                    rr = session.get(download_url, timeout=timeout)
+                    if rr.status_code == 200:
+                        with open(target, "wb") as f:
+                            f.write(rr.content)
+                    else:
+                        return False, f"下载文件失败 {download_url}: {rr.status_code}"
+                else:
+                    # fallback to contents API for this file
+                    file_meta = session.get(item["url"], headers=headers, params={"ref": branch}, timeout=timeout)
+                    if file_meta.status_code != 200:
+                        return False, f"get file meta failed: {file_meta.status_code}"
+                    content_b64 = file_meta.json().get("content", "")
+                    data = base64.b64decode(content_b64)
+                    with open(target, "wb") as f:
+                        f.write(data)
+            except Exception as e:
+                return False, f"下载单文件失败: {e}"
+        elif it_type == "dir":
+            subdir = os.path.join(save_to_dir, name)
+            ok, msg = download_github_dir(token, repo_full, f"{dir_in_repo.rstrip('/')}/{name}", subdir, branch, timeout)
+            if not ok:
+                return False, msg
+        else:
+            # ignore symlink/submodule etc.
+            continue
+    return True, "ok"
+
+def upload_local_dir_to_github(token, repo_full, local_dir, remote_dir, branch="main", commit_prefix="merge"):
+    """
+    将 local_dir 下所有文件逐个上传到 repo:remote_dir（覆盖）。返回列表 (remote_path, success_bool, result)
+    注意：对于大文件（> GITHUB_UPLOAD_MAX_BYTES）会跳过并返回错误信息；考虑改用 LFS 或 release asset。
+    """
+    results = []
+    for root, _, files in os.walk(local_dir):
+        for fn in files:
+            local_path = os.path.join(root, fn)
+            rel_path = os.path.relpath(local_path, local_dir)
+            remote_path = os.path.join(remote_dir, rel_path).replace("\\", "/").lstrip("/")
+            try:
+                with open(local_path, "rb") as f:
+                    content = f.read()
+                if len(content) > GITHUB_UPLOAD_MAX_BYTES:
+                    results.append((remote_path, False, f"file too large ({len(content)} bytes). Use LFS or upload manually."))
+                    continue
+                msg = f"{commit_prefix}: update {remote_path}"
+                ok, res = github_put_file(token, repo_full, remote_path, content, commit_message=msg, branch=branch)
+                results.append((remote_path, ok, res))
+            except Exception as e:
+                results.append((remote_path, False, f"read/upload exception: {e}"))
+    return results
+
+# 生成要合并的 chunk（将 DOCS_DIR 中的所有文件分块并返回 chunks/metadatas）
+def generate_chunks_from_docs(docs_dir, chunk_size=800, chunk_overlap=150):
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    chunks = []
+    metadatas = []
+    for fn in os.listdir(docs_dir):
+        fp = os.path.join(docs_dir, fn)
+        if not os.path.isfile(fp):
+            continue
+        txt = extract_text_from_file(fp)
+        if not txt or not txt.strip():
+            continue
+        subchunks = splitter.split_text(txt)
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+        for i, c in enumerate(subchunks):
+            chunks.append(c)
+            metadatas.append({"source": fn, "chunk_index": i, "merged_at": ts})
+    return chunks, metadatas
+
+def merge_new_chunks_into_github_chroma(github_token, github_repo, chroma_repo_dir, emb_obj, docs_dir, github_branch="main"):
+    """
+    完整流程：
+     1) 下载远端 chroma 目录到临时目录
+     2) 备份（zip）并上传到 repo backups/
+     3) 打开本地临时 chroma DB，追加 new_chunks，persist
+     4) 将本地临时目录上传回远端（覆盖）
+    返回 (True, info) 或 (False, err)
+    """
+    tmp_remote = _make_tmpdir("chroma_remote_")
+    try:
+        st.info("1) 开始下载远端 chroma 数据目录...")
+        ok, msg = download_github_dir(github_token, github_repo, chroma_repo_dir, tmp_remote, branch=github_branch)
+        if not ok:
+            return False, f"下载远端 chroma 失败: {msg}"
+
+        # 备份：把下载下来的目录 zip 打包并上传回仓库 backups/
+        backup_ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        backup_name = f"backups/chroma_backup_{backup_ts}.zip"
+        local_backup_zip = os.path.join(tempfile.gettempdir(), f"chroma_backup_{backup_ts}.zip")
+        _zip_dir(tmp_remote, local_backup_zip)
+        # 检查大小
+        if os.path.getsize(local_backup_zip) > GITHUB_UPLOAD_MAX_BYTES:
+            # 备份过大，提示用户并继续（但不上传备份），建议使用 LFS 或 S3
+            st.warning(f"备份 zip 太大（{os.path.getsize(local_backup_zip)} bytes），无法上传到 GitHub。请考虑使用 Git LFS 或 S3。备份已保存在服务器临时路径：{local_backup_zip}")
+            backup_uploaded = False
+            backup_remote_path = None
+        else:
+            with open(local_backup_zip, "rb") as f:
+                content = f.read()
+            ok_b, res_b = github_put_file(github_token, github_repo, backup_name, content, commit_message=f"backup chroma {backup_ts}", branch=github_branch)
+            if not ok_b:
+                return False, f"上传备份失败: {res_b}"
+            backup_uploaded = True
+            backup_remote_path = backup_name
+
+        st.info("2) 备份完成，准备打开本地 chroma 并合并新的 chunk ...")
+
+        # 打开 Chroma 指向下载的目录
+        try:
+            vectordb = Chroma(persist_directory=tmp_remote, embedding_function=emb_obj)
+        except Exception as e:
+            return False, f"打开远端 chroma 本地副本失败: {e}"
+
+        # 生成要新增的 chunk（从 DOCS_DIR）
+        new_chunks, new_mds = generate_chunks_from_docs(docs_dir)
+        if not new_chunks:
+            return False, "没有在 DOCS_DIR 中找到新的可索引文档或 chunk。"
+
+        st.info(f"将要添加的 chunk 数量: {len(new_chunks)} （请注意：可能会产生重复条目，建议后续去重或在 metadata 中比对）")
+
+        # 添加新向量（根据 Chroma 版本，调用 add_texts 或 add_documents）
+        try:
+            if hasattr(vectordb, "add_texts"):
+                vectordb.add_texts(texts=new_chunks, metadatas=new_mds)
+            else:
+                # fallback: 使用 from_texts + merge 或 add_documents
+                # 若没有 add_texts，尝试 add_documents（需要 Document 类型）
+                try:
+                    vectordb.add_documents([type("D",(object,),{"page_content":t})() for t in new_chunks])
+                except Exception:
+                    return False, "向量库不支持 add_texts/add_documents，无法追加。"
+        except Exception as e:
+            return False, f"向量追加失败: {e}"
+
+        # 持久化
+        try:
+            vectordb.persist()
+        except Exception as e:
+            return False, f"持久化失败: {e}"
+
+        st.info("新向量已写入本地副本，开始上传回 GitHub 覆盖远端 chroma 数据（逐文件覆盖）...")
+
+        # 上传回 GitHub（逐文件）；会返回每个文件的上传结果
+        upload_results = upload_local_dir_to_github(github_token, github_repo, tmp_remote, chroma_repo_dir, branch=github_branch, commit_prefix="merge")
+
+        # 检查是否有失败项（例如文件过大或上传错误）
+        fails = [r for r in upload_results if not r[1]]
+        if fails:
+            # 列出失败并返回（注意：在这种情况下远端可能已部分被覆盖）
+            return False, {"uploaded_count": len([r for r in upload_results if r[1]]), "fails": fails, "backup_uploaded": backup_uploaded, "backup_remote_path": backup_remote_path}
+
+        # 成功
+        return True, {"uploaded_count": len(upload_results), "backup_uploaded": backup_uploaded, "backup_remote_path": backup_remote_path}
+    finally:
+        # 清理临时目录
+        try:
+            shutil.rmtree(tmp_remote, ignore_errors=True)
+        except Exception:
+            pass
 
 def add_bg_from_local(image_path="static/bg.png", sidebar_cover_rgba="rgba(0,0,0,1.0)", main_overlay_rgba="rgba(255,255,255,0.0)"):
     """
@@ -356,9 +567,8 @@ def get_qa_history_chain(model_name="glm-4-plus", temperature=0.0, max_tokens=10
 
     system_prompt = (
     "你是一个问答任务的助手。"
-    "请优先结合检索到的上下文片段回答问题。"
+    "请优先结合检索到的上下文片段回答问题，并告知用户是否检索到"
     "如果检索到的上下文为空或不足以回答问题，请结合你的通用知识回答。"
-    "告知用户是否检索到上下文信息。"
     "保持回答简洁明了。"
         "\n\n"
         "{context}"
@@ -425,7 +635,7 @@ def main():
     add_bg_from_local(image_path="static/bg.png",
                       sidebar_cover_rgba="rgba(0,0,0,1.0)",
                       main_overlay_rgba="rgba(255,255,255,0.0)")
-    st.title("🔎 基于RAG的云端个人知识库助手 🦜")
+    st.title("🔎 云端智能个人知识库助手 🦜")
 
     # 左侧：参数与上传
     with st.sidebar:
@@ -496,16 +706,64 @@ def main():
 
             st.info("上传完成，如需加入检索库请点击“重建索引”。")
 
-        force_rebuild = st.button("🔁 重建索引 更新检索库")
+        # force_rebuild = st.button("🔁 重建索引 更新检索库")
+        # if force_rebuild:
+        #     with st.spinner("正在重建索引..."):
+        #         emb = ZhipuAIEmbeddings()
+        #         vectordb = rebuild_vector_index(emb)
+        #         if vectordb:
+        #             st.success("索引重建完成。")
+        #         else:
+        #             st.warning("索引目录中没有有效文档，未生成索引。")
+        # ---------- 合并：本地重建索引 + 可选：备份并合并到 GitHub Chroma ----------
+        force_rebuild = st.button("🔁 重建索引 更新检索库（并可选合并远端）")
         if force_rebuild:
             with st.spinner("正在重建索引..."):
                 emb = ZhipuAIEmbeddings()
                 vectordb = rebuild_vector_index(emb)
                 if vectordb:
-                    st.success("索引重建完成。")
+                    st.success("本地索引重建完成。")
                 else:
                     st.warning("索引目录中没有有效文档，未生成索引。")
+                    # 如果没有本地索引，则不继续合并
+                    continue_merge = False
+                # 如果要合并到 GitHub Chroma（仅在配置了 github_token & repo 时显示选项）
+                if "github_token" in locals() and github_token and "github_repo" in locals() and github_repo:
+                    # 给用户一个额外的确认开关（默认不合并）
+                    merge_to_github = st.checkbox("同时备份并合并到 GitHub Chroma（备份 -> 合并 -> 覆盖上传）", value=False)
+                else:
+                    merge_to_github = False
+                    if not (github_token and github_repo):
+                        st.info("若要同时合并到 GitHub Chroma，请在 Streamlit Secrets 或环境变量中配置 GITHUB_TOKEN 与 GITHUB_REPO。")
 
+                if vectordb and merge_to_github:
+                    # 运行合并流程（使用之前加入的 merge_new_chunks_into_github_chroma）
+                    with st.spinner("开始备份远端并合并新向量到 GitHub Chroma（可能较慢）..."):
+                        try:
+                            ok, info = merge_new_chunks_into_github_chroma(
+                                github_token=github_token,
+                                github_repo=github_repo,
+                                chroma_repo_dir="data_base/vector_db2/chroma",  # 根据你仓库实际路径调整
+                                emb_obj=emb,
+                                docs_dir=DOCS_DIR,
+                                github_branch=github_branch
+                            )
+                        except Exception as e:
+                            ok = False
+                            info = f"合并流程抛出异常: {e}"
+
+                        if ok:
+                            st.success("合并并上传到 GitHub Chroma 完成。")
+                            st.write(info)
+                            if isinstance(info, dict) and info.get("backup_uploaded"):
+                                st.info(f"备份已上传到仓库: {info.get('backup_remote_path')}")
+                            else:
+                                # 若备份未上传（通常是太大），提示服务器上备份位置（merge 函数会在 UI 中提示）
+                                st.info("若备份文件过大，已保存在服务器临时路径，请查看上方提示。")
+                        else:
+                            st.error("合并失败。")
+                            st.write(info)
+                            st.warning("若合并失败但上传了部分文件，仓库可能被部分覆盖。可通过备份回滚。")
 
     # 中央：对话区
     if "messages" not in st.session_state:
