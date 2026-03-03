@@ -22,7 +22,7 @@
 
 
 ## 🖥️ 界面展示
-![项目主界面](./static/AI.png](https://github.com/runn2020/LLM/blob/main/static/LLM.png))
+![项目主界面](./static/AI.png)
 
 
 
