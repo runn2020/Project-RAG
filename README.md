@@ -17,7 +17,7 @@
 -   📄 支持文档上传 → 自动解析 → 向量增量构建 → 实时生效
 -   ☁  基于 [Streamlit](https://share.streamlit.io/) 完成云端部署与交互界面设计
 
-    
+ ## 📌 项目实现   
 <div align="center">
   <img src="./static/项目流程.png" alt="项目主界面" width="80%">
   <p><em>图1：项目实现主要流程</em></p>
