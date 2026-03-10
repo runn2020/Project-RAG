@@ -19,7 +19,7 @@
 
  ## 📌 项目实现   
 <div align="center">
-  <img src="./static/项目流程.png" alt="项目主界面" width="80%">
+  <img src="./static/项目流程.png" alt="项目主界面" width="70%">
   <p><em>图1：项目实现主要流程</em></p>
 </div>
 
