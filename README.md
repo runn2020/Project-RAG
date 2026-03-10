@@ -18,7 +18,7 @@
 -   ☁  基于 [Streamlit](https://share.streamlit.io/) 完成云端部署与交互界面设计
 -   
 <div align="center">
-  <img src="./static/项目流程.pdf" alt="项目主界面" width="80%">
+  <img src="./static/项目流程.png" alt="项目主界面" width="80%">
   <p><em>图1：项目主界面预览</em></p>
 </div>
 
